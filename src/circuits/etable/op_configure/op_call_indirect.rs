@@ -1,5 +1,6 @@
 use crate::circuits::cell::*;
 use crate::circuits::etable::allocator::*;
+use crate::circuits::etable::stack_lookup_context::StackReadLookup;
 use crate::circuits::etable::ConstraintBuilder;
 use crate::circuits::etable::EventTableCommonConfig;
 use crate::circuits::etable::EventTableOpcodeConfig;
@@ -19,16 +20,14 @@ use num_bigint::BigUint;
 use specs::encode::br_table::encode_elem_entry;
 use specs::encode::frame_table::encode_frame_table_entry;
 use specs::encode::opcode::encode_call_indirect;
-use specs::mtable::LocationType;
 use specs::step::StepInfo;
 
 pub struct CallIndirectConfig<F: FieldExt> {
     type_index: AllocatedCommonRangeCell<F>,
     func_index: AllocatedCommonRangeCell<F>,
-    offset: AllocatedCommonRangeCell<F>,
     table_index: AllocatedCommonRangeCell<F>,
 
-    memory_table_lookup_stack_read: AllocatedMemoryTableLookupReadCell<F>,
+    offset_lookup: StackReadLookup<F>,
     elem_lookup: AllocatedUnlimitedCell<F>,
     frame_table_lookup: AllocatedJumpTableLookupCell<F>,
 }
@@ -41,9 +40,12 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for CallIndirectConfigBuilder
         allocator: &mut EventTableCellAllocator<F>,
         constraint_builder: &mut ConstraintBuilder<F>,
     ) -> Box<dyn EventTableOpcodeConfig<F>> {
+        let mut stack_lookup_context = common_config.stack_lookup_context.clone();
+
+        let offset_lookup = stack_lookup_context.pop(constraint_builder).unwrap();
+
         let type_index = allocator.alloc_common_range_cell();
         let table_index = allocator.alloc_common_range_cell();
-        let offset = allocator.alloc_common_range_cell();
         let func_index = allocator.alloc_common_range_cell();
 
         // Wasmi only support one table.
@@ -58,29 +60,17 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for CallIndirectConfigBuilder
             "op_call_indirect elem table lookup",
             Box::new(move |meta| {
                 vec![
+                    // According to WebAssebmly specification, offset has u32 type so that
+                    // the offset field in encode_elem_entry won't overflow.
                     elem_lookup.expr(meta)
                         - encode_elem_entry(
                             table_index.expr(meta),
                             type_index.expr(meta),
-                            offset.expr(meta),
+                            offset_lookup.value.expr(meta),
                             func_index.expr(meta),
                         ),
                 ]
             }),
-        );
-
-        let eid = common_config.eid_cell;
-        let sp = common_config.sp_cell;
-
-        let memory_table_lookup_stack_read = allocator.alloc_memory_table_lookup_read_cell(
-            "op_call_indirect stack read",
-            constraint_builder,
-            eid,
-            move |____| constant_from!(LocationType::Stack),
-            move |meta| sp.expr(meta) + constant_from!(1),
-            move |____| constant_from!(1),
-            move |meta| offset.expr(meta),
-            move |____| constant_from!(1),
         );
 
         let fid_cell = common_config.fid_cell;
@@ -108,9 +98,8 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for CallIndirectConfigBuilder
         Box::new(CallIndirectConfig {
             type_index,
             func_index,
-            offset,
             table_index,
-            memory_table_lookup_stack_read,
+            offset_lookup,
             elem_lookup,
             frame_table_lookup,
         })
@@ -137,7 +126,6 @@ impl<F: FieldExt> EventTableOpcodeConfig<F> for CallIndirectConfig<F> {
             } => {
                 self.table_index.assign(ctx, F::from(*table_index as u64))?;
                 self.type_index.assign(ctx, F::from(*type_index as u64))?;
-                self.offset.assign(ctx, F::from(*offset as u64))?;
                 self.func_index.assign(ctx, F::from(*func_index as u64))?;
 
                 self.elem_lookup.assign_bn(
@@ -150,13 +138,12 @@ impl<F: FieldExt> EventTableOpcodeConfig<F> for CallIndirectConfig<F> {
                     ),
                 )?;
 
-                self.memory_table_lookup_stack_read.assign(
+                self.offset_lookup.assign(
                     ctx,
                     entry.memory_rw_entires[0].start_eid,
                     step.current.eid,
                     entry.memory_rw_entires[0].end_eid,
                     step.current.sp + 1,
-                    LocationType::Stack,
                     true,
                     *offset as u64,
                 )?;
