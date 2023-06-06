@@ -1,6 +1,7 @@
 use crate::circuits::bit_table::encode_bit_table_popcnt;
 use crate::circuits::cell::*;
 use crate::circuits::etable::allocator::*;
+use crate::circuits::etable::stack_lookup_context::StackReadLookup;
 use crate::circuits::etable::ConstraintBuilder;
 use crate::circuits::etable::EventTableCommonConfig;
 use crate::circuits::etable::EventTableOpcodeConfig;
@@ -28,7 +29,6 @@ use specs::mtable::VarType;
 use specs::step::StepInfo;
 
 pub struct UnaryConfig<F: FieldExt> {
-    operand: AllocatedU64Cell<F>,
     result: AllocatedU64Cell<F>,
     operand_inv: AllocatedUnlimitedCell<F>,
     bits: AllocatedUnlimitedCell<F>,
@@ -49,7 +49,7 @@ pub struct UnaryConfig<F: FieldExt> {
 
     ctz_degree_helper: AllocatedUnlimitedCell<F>,
 
-    memory_table_lookup_stack_read: AllocatedMemoryTableLookupReadCell<F>,
+    operand_lookup: StackReadLookup<F>,
     memory_table_lookup_stack_write: AllocatedMemoryTableLookupWriteCell<F>,
 }
 
@@ -61,7 +61,11 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for UnaryConfigBuilder {
         allocator: &mut EventTableCellAllocator<F>,
         constraint_builder: &mut ConstraintBuilder<F>,
     ) -> Box<dyn EventTableOpcodeConfig<F>> {
-        let operand = allocator.alloc_u64_cell();
+        let mut stack_lookup_context = common_config.stack_lookup_context.clone();
+
+        let operand_lookup = stack_lookup_context.pop(constraint_builder).unwrap();
+        let is_i32 = operand_lookup.is_i32;
+
         let result = allocator.alloc_u64_cell();
         let operand_is_zero = allocator.alloc_bit_cell();
         let operand_inv = allocator.alloc_unlimited_cell();
@@ -70,7 +74,6 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for UnaryConfigBuilder {
         let is_ctz = allocator.alloc_bit_cell();
         let is_clz = allocator.alloc_bit_cell();
         let is_popcnt = allocator.alloc_bit_cell();
-        let is_i32 = allocator.alloc_bit_cell();
 
         let boundary = allocator.alloc_unlimited_cell();
         let aux1 = allocator.alloc_u64_cell();
@@ -95,8 +98,9 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for UnaryConfigBuilder {
             "op_unary: zero cond",
             Box::new(move |meta| {
                 vec![
-                    operand_is_zero.expr(meta) * operand.u64_cell.expr(meta),
-                    operand.u64_cell.expr(meta) * operand_inv.expr(meta) - constant_from!(1)
+                    operand_is_zero.expr(meta) * operand_lookup.value.u64_cell.expr(meta),
+                    operand_lookup.value.u64_cell.expr(meta) * operand_inv.expr(meta)
+                        - constant_from!(1)
                         + operand_is_zero.expr(meta),
                 ]
             }),
@@ -118,7 +122,7 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for UnaryConfigBuilder {
                     operand_is_zero.expr(meta) * (result.u64_cell.expr(meta) - bits.expr(meta)),
                     operand_is_not_zero.clone()
                         * (boundary.expr(meta) + aux1.u64_cell.expr(meta)
-                            - operand.u64_cell.expr(meta)),
+                            - operand_lookup.value.u64_cell.expr(meta)),
                     operand_is_not_zero.clone()
                         * (aux1.u64_cell.expr(meta) + aux2.u64_cell.expr(meta) + constant_from!(1)
                             - boundary.expr(meta)),
@@ -146,7 +150,7 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for UnaryConfigBuilder {
                     operand_is_zero.expr(meta) * (result.u64_cell.expr(meta) - bits.expr(meta)),
                     operand_is_not_zero
                         * (ctz_degree_helper.expr(meta) + boundary.expr(meta)
-                            - operand.u64_cell.expr(meta)),
+                            - operand_lookup.value.u64_cell.expr(meta)),
                     lookup_pow.expr(meta)
                         - pow_table_encode(boundary.expr(meta), result.u64_cell.expr(meta)),
                 ]
@@ -161,7 +165,10 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for UnaryConfigBuilder {
             Box::new(move |meta| {
                 vec![
                     (lookup_popcnt.0.expr(meta)
-                        - encode_bit_table_popcnt(operand.expr(meta), result.expr(meta)))
+                        - encode_bit_table_popcnt(
+                            operand_lookup.value.expr(meta),
+                            result.expr(meta),
+                        ))
                         * is_popcnt.expr(meta),
                 ]
             }),
@@ -169,17 +176,6 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for UnaryConfigBuilder {
 
         let eid = common_config.eid_cell;
         let sp = common_config.sp_cell;
-
-        let memory_table_lookup_stack_read = allocator.alloc_memory_table_lookup_read_cell(
-            "op_unary stack read",
-            constraint_builder,
-            eid,
-            move |____| constant_from!(LocationType::Stack as u64),
-            move |meta| sp.expr(meta) + constant_from!(1),
-            move |meta| is_i32.expr(meta),
-            move |meta| operand.u64_cell.expr(meta),
-            move |____| constant_from!(1),
-        );
 
         let memory_table_lookup_stack_write = allocator.alloc_memory_table_lookup_write_cell(
             "op_unary stack write",
@@ -193,7 +189,6 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for UnaryConfigBuilder {
         );
 
         Box::new(UnaryConfig {
-            operand,
             result,
             operand_inv,
             bits,
@@ -208,7 +203,7 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for UnaryConfigBuilder {
             lookup_pow,
             ctz_degree_helper,
             bit_table_lookup: lookup_popcnt,
-            memory_table_lookup_stack_read,
+            operand_lookup,
             memory_table_lookup_stack_write,
         })
     }
@@ -250,9 +245,7 @@ impl<F: FieldExt> EventTableOpcodeConfig<F> for UnaryConfig<F> {
                 operand,
                 result,
             } => {
-                self.operand.assign(ctx, *operand)?;
                 self.result.assign(ctx, *result)?;
-                self.is_i32.assign_bool(ctx, *vtype == VarType::I32)?;
 
                 self.operand_inv
                     .assign(ctx, F::from(*operand).invert().unwrap_or(F::zero()))?;
@@ -334,13 +327,12 @@ impl<F: FieldExt> EventTableOpcodeConfig<F> for UnaryConfig<F> {
                     }
                 }
 
-                self.memory_table_lookup_stack_read.assign(
+                self.operand_lookup.assign(
                     ctx,
                     entry.memory_rw_entires[0].start_eid,
                     step.current.eid,
                     entry.memory_rw_entires[0].end_eid,
                     step.current.sp + 1,
-                    LocationType::Stack,
                     *vtype == VarType::I32,
                     *operand,
                 )?;
