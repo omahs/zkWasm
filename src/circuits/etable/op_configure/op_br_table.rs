@@ -1,5 +1,6 @@
 use crate::circuits::cell::*;
 use crate::circuits::etable::allocator::*;
+use crate::circuits::etable::stack_lookup_context::StackReadLookup;
 use crate::circuits::etable::ConstraintBuilder;
 use crate::circuits::etable::EventTableCommonConfig;
 use crate::circuits::etable::EventTableOpcodeConfig;
@@ -27,7 +28,6 @@ pub struct BrTableConfig<F: FieldExt> {
     drop: AllocatedCommonRangeCell<F>,
     dst_iid: AllocatedCommonRangeCell<F>,
 
-    expected_index: AllocatedU64Cell<F>,
     effective_index: AllocatedCommonRangeCell<F>,
     targets_len: AllocatedCommonRangeCell<F>,
     is_out_of_bound: AllocatedBitCell<F>,
@@ -36,7 +36,7 @@ pub struct BrTableConfig<F: FieldExt> {
 
     br_table_lookup: AllocatedUnlimitedCell<F>,
 
-    memory_table_lookup_stack_read_index: AllocatedMemoryTableLookupReadCell<F>,
+    expected_index_lookup: StackReadLookup<F>,
     memory_table_lookup_stack_read_return_value: AllocatedMemoryTableLookupReadCell<F>,
     memory_table_lookup_stack_write_return_value: AllocatedMemoryTableLookupWriteCell<F>,
 }
@@ -49,12 +49,15 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for BrTableConfigBuilder {
         allocator: &mut EventTableCellAllocator<F>,
         constraint_builder: &mut ConstraintBuilder<F>,
     ) -> Box<dyn EventTableOpcodeConfig<F>> {
+        let mut stack_lookup_context = common_config.stack_lookup_context.clone();
+
+        let expected_index_lookup = stack_lookup_context.pop(constraint_builder).unwrap();
+
         let keep = allocator.alloc_bit_cell();
         let keep_is_i32 = allocator.alloc_bit_cell();
         let keep_value = allocator.alloc_u64_cell();
         let drop = allocator.alloc_common_range_cell();
         let dst_iid = allocator.alloc_common_range_cell();
-        let expected_index = allocator.alloc_u64_cell();
         let effective_index = allocator.alloc_common_range_cell();
         let targets_len = allocator.alloc_common_range_cell();
         let is_out_of_bound = allocator.alloc_bit_cell();
@@ -69,10 +72,13 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for BrTableConfigBuilder {
                     is_not_out_of_bound.expr(meta) + is_out_of_bound.expr(meta) - constant_from!(1),
                     /* is_out_of_bound -> expected >= targets_len */
                     is_out_of_bound.expr(meta)
-                        * (targets_len.expr(meta) + diff.expr(meta) - expected_index.expr(meta)),
+                        * (targets_len.expr(meta) + diff.expr(meta)
+                            - expected_index_lookup.value.expr(meta)),
                     /* !is_out_of_bound -> expected_index < targets_len */
                     is_not_out_of_bound.expr(meta)
-                        * (expected_index.expr(meta) + diff.expr(meta) + constant_from!(1)
+                        * (expected_index_lookup.value.expr(meta)
+                            + diff.expr(meta)
+                            + constant_from!(1)
                             - targets_len.expr(meta)),
                 ]
             }),
@@ -85,7 +91,7 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for BrTableConfigBuilder {
                     is_out_of_bound.expr(meta)
                         * (targets_len.expr(meta) - constant_from!(1) - effective_index.expr(meta)),
                     is_not_out_of_bound.expr(meta)
-                        * (expected_index.expr(meta) - effective_index.expr(meta)),
+                        * (expected_index_lookup.value.expr(meta) - effective_index.expr(meta)),
                 ]
             }),
         );
@@ -113,17 +119,6 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for BrTableConfigBuilder {
 
         let eid = common_config.eid_cell;
         let sp = common_config.sp_cell;
-
-        let memory_table_lookup_stack_read_index = allocator.alloc_memory_table_lookup_read_cell(
-            "op_br_table stack read index",
-            constraint_builder,
-            eid,
-            move |____| constant_from!(LocationType::Stack as u64),
-            move |meta| sp.expr(meta) + constant_from!(1),
-            move |____| constant_from!(1),
-            move |meta| expected_index.expr(meta),
-            move |____| constant_from!(1),
-        );
 
         let memory_table_lookup_stack_read_return_value = allocator
             .alloc_memory_table_lookup_read_cell(
@@ -155,14 +150,13 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for BrTableConfigBuilder {
             keep_value,
             drop,
             dst_iid,
-            expected_index,
             effective_index,
             targets_len,
             is_out_of_bound,
             is_not_out_of_bound,
             diff,
             br_table_lookup,
-            memory_table_lookup_stack_read_index,
+            expected_index_lookup,
             memory_table_lookup_stack_read_return_value,
             memory_table_lookup_stack_write_return_value,
         })
@@ -200,13 +194,12 @@ impl<F: FieldExt> EventTableOpcodeConfig<F> for BrTableConfig<F> {
                 self.drop.assign(ctx, F::from(*drop as u64))?;
                 self.dst_iid.assign(ctx, F::from(*dst_pc as u64))?;
 
-                self.memory_table_lookup_stack_read_index.assign(
+                self.expected_index_lookup.assign(
                     ctx,
                     entry.memory_rw_entires[0].start_eid,
                     step.current.eid,
                     entry.memory_rw_entires[0].end_eid,
                     step.current.sp + 1,
-                    LocationType::Stack,
                     true,
                     index,
                 )?;
@@ -248,7 +241,6 @@ impl<F: FieldExt> EventTableOpcodeConfig<F> for BrTableConfig<F> {
                 } else {
                     targets_len - 1
                 };
-                self.expected_index.assign(ctx, index)?;
                 self.effective_index.assign(ctx, F::from(effective_index))?;
                 self.is_out_of_bound
                     .assign_bool(ctx, index != effective_index)?;
