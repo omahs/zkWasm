@@ -1,5 +1,6 @@
 use crate::circuits::cell::*;
 use crate::circuits::etable::allocator::*;
+use crate::circuits::etable::stack_lookup_context::StackReadLookup;
 use crate::circuits::etable::ConstraintBuilder;
 use crate::circuits::etable::EventTableCommonConfig;
 use crate::circuits::etable::EventTableOpcodeConfig;
@@ -23,7 +24,6 @@ use specs::mtable::VarType;
 use specs::step::StepInfo;
 
 pub struct SelectConfig<F: FieldExt> {
-    cond: AllocatedU64Cell<F>,
     cond_inv: AllocatedUnlimitedCell<F>,
 
     val1: AllocatedU64Cell<F>,
@@ -31,7 +31,7 @@ pub struct SelectConfig<F: FieldExt> {
     res: AllocatedU64Cell<F>,
     is_i32: AllocatedBitCell<F>,
 
-    memory_table_lookup_stack_read_cond: AllocatedMemoryTableLookupReadCell<F>,
+    cond_lookup: StackReadLookup<F>,
     memory_table_lookup_stack_read_val2: AllocatedMemoryTableLookupReadCell<F>,
     memory_table_lookup_stack_read_val1: AllocatedMemoryTableLookupReadCell<F>,
     memory_table_lookup_stack_write: AllocatedMemoryTableLookupWriteCell<F>,
@@ -45,7 +45,9 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for SelectConfigBuilder {
         allocator: &mut EventTableCellAllocator<F>,
         constraint_builder: &mut ConstraintBuilder<F>,
     ) -> Box<dyn EventTableOpcodeConfig<F>> {
-        let cond = allocator.alloc_u64_cell();
+        let mut stack_lookup_context = common_config.stack_lookup_context.clone();
+
+        let cond_lookup = stack_lookup_context.pop(constraint_builder).unwrap();
         let cond_inv = allocator.alloc_unlimited_cell();
 
         let val1 = allocator.alloc_u64_cell();
@@ -57,7 +59,8 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for SelectConfigBuilder {
             "select: cond is zero",
             Box::new(move |meta| {
                 vec![
-                    (constant_from!(1) - cond.u64_cell.expr(meta) * cond_inv.expr(meta))
+                    (constant_from!(1)
+                        - cond_lookup.value.u64_cell.expr(meta) * cond_inv.expr(meta))
                         * (res.u64_cell.expr(meta) - val2.u64_cell.expr(meta)),
                 ]
             }),
@@ -67,24 +70,14 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for SelectConfigBuilder {
             "select: cond is not zero",
             Box::new(move |meta| {
                 vec![
-                    cond.u64_cell.expr(meta) * (res.u64_cell.expr(meta) - val1.u64_cell.expr(meta)),
+                    cond_lookup.value.u64_cell.expr(meta)
+                        * (res.u64_cell.expr(meta) - val1.u64_cell.expr(meta)),
                 ]
             }),
         );
 
         let eid = common_config.eid_cell;
         let sp = common_config.sp_cell;
-
-        let memory_table_lookup_stack_read_cond = allocator.alloc_memory_table_lookup_read_cell(
-            "op_select stack read",
-            constraint_builder,
-            eid,
-            move |____| constant_from!(LocationType::Stack as u64),
-            move |meta| sp.expr(meta) + constant_from!(1),
-            move |____| constant_from!(1),
-            move |meta| cond.u64_cell.expr(meta),
-            move |____| constant_from!(1),
-        );
 
         let memory_table_lookup_stack_read_val2 = allocator.alloc_memory_table_lookup_read_cell(
             "op_select stack read",
@@ -120,13 +113,12 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for SelectConfigBuilder {
         );
 
         Box::new(SelectConfig {
-            cond,
             cond_inv,
             val1,
             val2,
             res,
             is_i32,
-            memory_table_lookup_stack_read_cond,
+            cond_lookup,
             memory_table_lookup_stack_read_val2,
             memory_table_lookup_stack_read_val1,
             memory_table_lookup_stack_write,
@@ -157,19 +149,17 @@ impl<F: FieldExt> EventTableOpcodeConfig<F> for SelectConfig<F> {
             } => {
                 self.val1.assign(ctx, *val1)?;
                 self.val2.assign(ctx, *val2)?;
-                self.cond.assign(ctx, *cond)?;
                 self.cond_inv
                     .assign(ctx, F::from(*cond).invert().unwrap_or(F::zero()))?;
                 self.res.assign(ctx, *result)?;
                 self.is_i32.assign_bool(ctx, *vtype == VarType::I32)?;
 
-                self.memory_table_lookup_stack_read_cond.assign(
+                self.cond_lookup.assign(
                     ctx,
                     entry.memory_rw_entires[0].start_eid,
                     step.current.eid,
                     entry.memory_rw_entires[0].end_eid,
                     step.current.sp + 1,
-                    LocationType::Stack,
                     true,
                     *cond,
                 )?;
