@@ -1,5 +1,6 @@
 use crate::circuits::cell::*;
 use crate::circuits::etable::allocator::*;
+use crate::circuits::etable::stack_lookup_context::StackReadLookup;
 use crate::circuits::etable::ConstraintBuilder;
 use crate::circuits::etable::EventTableCommonConfig;
 use crate::circuits::etable::EventTableOpcodeConfig;
@@ -21,7 +22,6 @@ use specs::step::StepInfo;
 
 pub struct ConversionConfig<F: FieldExt> {
     value: AllocatedU64CellWithFlagBit<F, 1>,
-    value_is_i32: AllocatedBitCell<F>,
     res: AllocatedU64Cell<F>,
     res_is_i32: AllocatedBitCell<F>,
 
@@ -29,7 +29,7 @@ pub struct ConversionConfig<F: FieldExt> {
     is_i64_extend_i32_u: AllocatedBitCell<F>,
     is_i64_extend_i32_s: AllocatedBitCell<F>,
 
-    memory_table_lookup_stack_read: AllocatedMemoryTableLookupReadCell<F>,
+    memory_table_lookup_stack_read: StackReadLookup<F>,
     memory_table_lookup_stack_write: AllocatedMemoryTableLookupWriteCell<F>,
 }
 
@@ -41,8 +41,13 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for ConversionConfigBuilder {
         allocator: &mut EventTableCellAllocator<F>,
         constraint_builder: &mut ConstraintBuilder<F>,
     ) -> Box<dyn EventTableOpcodeConfig<F>> {
-        let value = allocator.alloc_u64_with_flag_bit_cell(constraint_builder);
-        let value_is_i32 = allocator.alloc_bit_cell();
+        let mut stack_lookup_context = common_config.stack_lookup_context.clone();
+        let memory_table_lookup_stack_read = stack_lookup_context.pop(constraint_builder).unwrap();
+
+        let value = allocator.constraint_u64_with_flag_bit_cell(
+            constraint_builder,
+            memory_table_lookup_stack_read.value,
+        );
         let res = allocator.alloc_u64_cell();
         let res_is_i32 = allocator.alloc_bit_cell();
 
@@ -66,10 +71,10 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for ConversionConfigBuilder {
             "op_conversion type matches op",
             Box::new(move |meta| {
                 vec![
-                    is_i32_wrap_i64.expr(meta) * value_is_i32.expr(meta),
+                    is_i32_wrap_i64.expr(meta) * memory_table_lookup_stack_read.is_i32.expr(meta),
                     is_i32_wrap_i64.expr(meta) * (res_is_i32.expr(meta) - constant_from!(1)),
                     (is_i64_extend_i32_s.expr(meta) + is_i64_extend_i32_u.expr(meta))
-                        * (value_is_i32.expr(meta) - constant_from!(1)),
+                        * (memory_table_lookup_stack_read.is_i32.expr(meta) - constant_from!(1)),
                     (is_i64_extend_i32_s.expr(meta) + is_i64_extend_i32_u.expr(meta))
                         * res_is_i32.expr(meta),
                 ]
@@ -113,17 +118,6 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for ConversionConfigBuilder {
         let eid = common_config.eid_cell;
         let sp = common_config.sp_cell;
 
-        let memory_table_lookup_stack_read = allocator.alloc_memory_table_lookup_read_cell(
-            "op_conversion stack read",
-            constraint_builder,
-            eid,
-            move |____| constant_from!(LocationType::Stack as u64),
-            move |meta| sp.expr(meta) + constant_from!(1),
-            move |meta| value_is_i32.expr(meta),
-            move |meta| value.u64_cell.expr(meta),
-            move |____| constant_from!(1),
-        );
-
         let memory_table_lookup_stack_write = allocator.alloc_memory_table_lookup_write_cell(
             "op_conversion stack write",
             constraint_builder,
@@ -137,7 +131,6 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for ConversionConfigBuilder {
 
         Box::new(ConversionConfig {
             value,
-            value_is_i32,
             res,
             res_is_i32,
             is_i32_wrap_i64,
@@ -199,7 +192,6 @@ impl<F: FieldExt> EventTableOpcodeConfig<F> for ConversionConfig<F> {
 
         self.value.assign(ctx, value)?;
         self.res.assign(ctx, result)?;
-        self.value_is_i32.assign(ctx, F::from(value_type as u64))?;
         self.res_is_i32.assign(ctx, F::from(result_type as u64))?;
 
         self.memory_table_lookup_stack_read.assign(
@@ -208,7 +200,6 @@ impl<F: FieldExt> EventTableOpcodeConfig<F> for ConversionConfig<F> {
             step.current.eid,
             entry.memory_rw_entires[0].end_eid,
             step.current.sp + 1,
-            LocationType::Stack,
             value_type == VarType::I32,
             value,
         )?;
