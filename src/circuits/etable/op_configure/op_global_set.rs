@@ -1,5 +1,6 @@
 use crate::circuits::cell::*;
 use crate::circuits::etable::allocator::*;
+use crate::circuits::etable::stack_lookup_context::StackReadLookup;
 use crate::circuits::etable::ConstraintBuilder;
 use crate::circuits::etable::EventTableCommonConfig;
 use crate::circuits::etable::EventTableOpcodeConfig;
@@ -21,9 +22,7 @@ use specs::step::StepInfo;
 
 pub struct GlobalSetConfig<F: FieldExt> {
     idx_cell: AllocatedCommonRangeCell<F>,
-    is_i32_cell: AllocatedBitCell<F>,
-    value_cell: AllocatedU64Cell<F>,
-    memory_table_lookup_stack_read: AllocatedMemoryTableLookupReadCell<F>,
+    stack_reading_lookup: StackReadLookup<F>,
     memory_table_lookup_global_write: AllocatedMemoryTableLookupWriteCell<F>,
 }
 
@@ -35,23 +34,13 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for GlobalSetConfigBuilder {
         allocator: &mut EventTableCellAllocator<F>,
         constraint_builder: &mut ConstraintBuilder<F>,
     ) -> Box<dyn EventTableOpcodeConfig<F>> {
-        let is_i32_cell = allocator.alloc_bit_cell();
+        let mut stack_lookup_context = common_config.stack_lookup_context.clone();
+
+        let stack_reading_lookup = stack_lookup_context.pop(constraint_builder).unwrap();
+        let is_i32_cell = stack_reading_lookup.is_i32;
         let idx_cell = allocator.alloc_common_range_cell();
-        let value_cell = allocator.alloc_u64_cell();
 
-        let sp_cell = common_config.sp_cell;
         let eid_cell = common_config.eid_cell;
-
-        let memory_table_lookup_stack_read = allocator.alloc_memory_table_lookup_read_cell(
-            "op_global_set stack read",
-            constraint_builder,
-            eid_cell,
-            move |____| constant_from!(LocationType::Stack as u64),
-            move |meta| sp_cell.expr(meta) + constant_from!(1),
-            move |meta| is_i32_cell.expr(meta),
-            move |meta| value_cell.u64_cell.expr(meta),
-            move |____| constant_from!(1),
-        );
 
         let memory_table_lookup_global_write = allocator.alloc_memory_table_lookup_write_cell(
             "op_global_set global write",
@@ -60,15 +49,13 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for GlobalSetConfigBuilder {
             move |____| constant_from!(LocationType::Global as u64),
             move |meta| idx_cell.expr(meta),
             move |meta| is_i32_cell.expr(meta),
-            move |meta| value_cell.u64_cell.expr(meta),
+            move |meta| stack_reading_lookup.value.expr(meta),
             move |____| constant_from!(1),
         );
 
         Box::new(GlobalSetConfig {
             idx_cell,
-            is_i32_cell,
-            value_cell,
-            memory_table_lookup_stack_read,
+            stack_reading_lookup,
             memory_table_lookup_global_write,
         })
     }
@@ -90,16 +77,13 @@ impl<F: FieldExt> EventTableOpcodeConfig<F> for GlobalSetConfig<F> {
                 idx, vtype, value, ..
             } => {
                 self.idx_cell.assign(ctx, F::from(*idx as u64))?;
-                self.is_i32_cell.assign(ctx, F::from(*vtype as u64))?;
-                self.value_cell.assign(ctx, *value)?;
 
-                self.memory_table_lookup_stack_read.assign(
+                self.stack_reading_lookup.assign(
                     ctx,
                     entry.memory_rw_entires[0].start_eid,
                     step.current.eid,
                     entry.memory_rw_entires[0].end_eid,
                     step.current.sp + 1,
-                    LocationType::Stack,
                     *vtype == VarType::I32,
                     *value,
                 )?;
