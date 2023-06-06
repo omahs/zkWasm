@@ -1,6 +1,7 @@
 use crate::circuits::bit_table::encode_bit_table_binary;
 use crate::circuits::cell::*;
 use crate::circuits::etable::allocator::*;
+use crate::circuits::etable::stack_lookup_context::StackReadLookup;
 use crate::circuits::etable::ConstraintBuilder;
 use crate::circuits::etable::EventTableCommonConfig;
 use crate::circuits::etable::EventTableOpcodeConfig;
@@ -27,17 +28,15 @@ use specs::mtable::VarType;
 use specs::step::StepInfo;
 
 pub struct BinBitConfig<F: FieldExt> {
+    is_i32: AllocatedBitCell<F>,
     lhs: AllocatedU64Cell<F>,
-    rhs: AllocatedU64Cell<F>,
     res: AllocatedU64Cell<F>,
     op_class: AllocatedCommonRangeCell<F>,
-
-    is_i32: AllocatedBitCell<F>,
 
     bit_table_lookup: AllocatedBitTableLookupCell<F>,
 
     memory_table_lookup_stack_read_lhs: AllocatedMemoryTableLookupReadCell<F>,
-    memory_table_lookup_stack_read_rhs: AllocatedMemoryTableLookupReadCell<F>,
+    rhs_lookup: StackReadLookup<F>,
     memory_table_lookup_stack_write: AllocatedMemoryTableLookupWriteCell<F>,
 }
 
@@ -49,9 +48,12 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for BinBitConfigBuilder {
         allocator: &mut EventTableCellAllocator<F>,
         constraint_builder: &mut ConstraintBuilder<F>,
     ) -> Box<dyn EventTableOpcodeConfig<F>> {
-        let is_i32 = allocator.alloc_bit_cell();
+        let mut stack_lookup_context = common_config.stack_lookup_context.clone();
+
+        let rhs_lookup = stack_lookup_context.pop(constraint_builder).unwrap();
+
+        let is_i32 = rhs_lookup.is_i32;
         let lhs = allocator.alloc_u64_cell();
-        let rhs = allocator.alloc_u64_cell();
         let res = allocator.alloc_u64_cell();
 
         let op_class = allocator.alloc_common_range_cell();
@@ -60,17 +62,6 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for BinBitConfigBuilder {
         let sp = common_config.sp_cell;
 
         let bit_table_lookup = common_config.bit_table_lookup_cell;
-
-        let memory_table_lookup_stack_read_rhs = allocator.alloc_memory_table_lookup_read_cell(
-            "op_bin stack read",
-            constraint_builder,
-            eid,
-            move |____| constant_from!(LocationType::Stack as u64),
-            move |meta| sp.expr(meta) + constant_from!(1),
-            move |meta| is_i32.expr(meta),
-            move |meta| rhs.u64_cell.expr(meta),
-            move |____| constant_from!(1),
-        );
 
         let memory_table_lookup_stack_read_lhs = allocator.alloc_memory_table_lookup_read_cell(
             "op_bin stack read",
@@ -102,7 +93,7 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for BinBitConfigBuilder {
                         - encode_bit_table_binary(
                             op_class.expr(meta),
                             lhs.expr(meta),
-                            rhs.expr(meta),
+                            rhs_lookup.value.expr(meta),
                             res.expr(meta),
                         ),
                 ]
@@ -111,13 +102,12 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for BinBitConfigBuilder {
 
         Box::new(BinBitConfig {
             lhs,
-            rhs,
             res,
             op_class,
             is_i32,
             bit_table_lookup,
             memory_table_lookup_stack_read_lhs,
-            memory_table_lookup_stack_read_rhs,
+            rhs_lookup,
             memory_table_lookup_stack_write,
         })
     }
@@ -167,9 +157,7 @@ impl<F: FieldExt> EventTableOpcodeConfig<F> for BinBitConfig<F> {
             _ => unreachable!(),
         };
 
-        self.is_i32.assign_bool(ctx, vtype == VarType::I32)?;
         self.lhs.assign(ctx, left)?;
-        self.rhs.assign(ctx, right)?;
         self.res.assign(ctx, value)?;
 
         self.bit_table_lookup.0.assign_bn(
@@ -194,13 +182,12 @@ impl<F: FieldExt> EventTableOpcodeConfig<F> for BinBitConfig<F> {
             }
         };
 
-        self.memory_table_lookup_stack_read_rhs.assign(
+        self.rhs_lookup.assign(
             ctx,
             entry.memory_rw_entires[0].start_eid,
             step.current.eid,
             entry.memory_rw_entires[0].end_eid,
             step.current.sp + 1,
-            LocationType::Stack,
             vtype == VarType::I32,
             right,
         )?;
