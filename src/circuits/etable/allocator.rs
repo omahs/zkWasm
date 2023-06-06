@@ -576,6 +576,41 @@ impl<F: FieldExt> EventTableCellAllocator<F> {
         }
     }
 
+    pub(crate) fn constraint_u64_with_flag_bit_cell_dyn(
+        &mut self,
+        constraint_builder: &mut ConstraintBuilder<F>,
+        value: AllocatedU64Cell<F>,
+        is_i32: impl Fn(&mut VirtualCells<'_, F>) -> Expression<F> + 'static,
+    ) -> AllocatedU64CellWithFlagBitDyn<F> {
+        let flag_bit_cell = self.alloc_bit_cell();
+        let flag_u16_rem_cell = self.alloc_common_range_cell();
+        let flag_u16_rem_diff_cell = self.alloc_common_range_cell();
+
+        constraint_builder.push(
+            "flag bit dyn",
+            Box::new(move |meta| {
+                let flag_u16 = value.u16_cells_le[3].expr(meta)
+                    + is_i32(meta)
+                        * (value.u16_cells_le[1].expr(meta) - value.u16_cells_le[3].expr(meta));
+                vec![
+                    (flag_bit_cell.expr(meta) * constant_from!(1 << 15)
+                        + flag_u16_rem_cell.expr(meta)
+                        - flag_u16),
+                    (flag_u16_rem_cell.expr(meta) + flag_u16_rem_diff_cell.expr(meta)
+                        - constant_from!((1 << 15) - 1)),
+                ]
+            }),
+        );
+
+        AllocatedU64CellWithFlagBitDyn {
+            u16_cells_le: value.u16_cells_le,
+            u64_cell: value.u64_cell,
+            flag_bit_cell,
+            flag_u16_rem_cell,
+            flag_u16_rem_diff_cell,
+        }
+    }
+
     pub(crate) fn alloc_u64_with_flag_bit_cell_dyn_sign(
         &mut self,
         constraint_builder: &mut ConstraintBuilder<F>,

@@ -181,6 +181,7 @@ impl<F: FieldExt> AllocatedU64CellWithFlagBitDyn<F> {
         for i in 0..4 {
             self.u16_cells_le[i].assign(ctx, ((value >> (i * 16)) & 0xffffu64).into())?;
         }
+        // TODO: remove me
         self.u64_cell.assign(ctx, value.into())?;
 
         let pos = if is_i32 { 1 } else { 3 };
