@@ -335,7 +335,10 @@ impl<F: FieldExt> EventTableCellAllocator<F> {
         }
     }
 
-    fn alloc(&mut self, t: &EventTableCellType) -> AllocatedCell<F> {
+    pub(in crate::circuits::etable) fn alloc(
+        &mut self,
+        t: &EventTableCellType,
+    ) -> AllocatedCell<F> {
         let v = self.free_cells.get_mut(t).unwrap();
 
         let res = AllocatedCell {

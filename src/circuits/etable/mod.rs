@@ -37,9 +37,10 @@ use crate::circuits::etable::op_configure::op_memory_size::MemorySizeConfigBuild
 use crate::circuits::etable::op_configure::op_rel::RelConfigBuilder;
 use crate::circuits::etable::op_configure::op_return::ReturnConfigBuilder;
 use crate::circuits::etable::op_configure::op_select::SelectConfigBuilder;
-use crate::circuits::etable::op_configure::op_store::StoreConfigBuilder;
+// use crate::circuits::etable::op_configure::op_store::StoreConfigBuilder;
 use crate::circuits::etable::op_configure::op_test::TestConfigBuilder;
 use crate::circuits::etable::op_configure::op_unary::UnaryConfigBuilder;
+use crate::circuits::etable::stack_lookup_context::StackLookupContext;
 use crate::constant_from;
 use crate::fixed_curr;
 use crate::foreign::require_helper::etable_op_configure::ETableRequireHelperTableConfigBuilder;
@@ -68,6 +69,7 @@ mod op_configure;
 
 pub(crate) mod allocator;
 pub(crate) mod constraint_builder;
+pub(crate) mod stack_lookup_context;
 
 pub(crate) const EVENT_TABLE_ENTRY_ROWS: i32 = 4;
 pub(crate) const OP_CAPABILITY: usize = 32;
@@ -97,6 +99,7 @@ pub struct EventTableCommonConfig<F: FieldExt> {
     bit_table_lookup_cell: AllocatedBitTableLookupCell<F>,
     external_foreign_call_lookup_cell: AllocatedUnlimitedCell<F>,
 
+    stack_lookup_context: StackLookupContext<F>,
     circuit_configure: CircuitConfigure,
 }
 
@@ -207,6 +210,8 @@ impl<F: FieldExt> EventTableConfig<F> {
             EventTableCellAllocator::new(meta, step_sel, rtable, mtable, jtable, bit_table, cols);
         allocator.enable_equality(meta, &EventTableCellType::CommonRange);
 
+        let stack_lookup_context = StackLookupContext::<F>::new(&mut allocator);
+
         let ops = [0; OP_CAPABILITY].map(|_| allocator.alloc_bit_cell());
         let enabled_cell = allocator.alloc_bit_cell();
 
@@ -227,6 +232,10 @@ impl<F: FieldExt> EventTableConfig<F> {
         let pow_table_lookup_cell = allocator.alloc_unlimited_cell();
         let bit_table_lookup_cell = allocator.alloc_bit_table_lookup_cell();
         let external_foreign_call_lookup_cell = allocator.alloc_unlimited_cell();
+
+        stack_lookup_context.configure(meta, &eid_cell, &sp_cell, |meta| {
+            enabled_cell.expr(meta) * fixed_curr!(meta, step_sel)
+        });
 
         let mut foreign_table_reserved_lookup_cells = [(); FOREIGN_LOOKUP_CAPABILITY]
             .map(|_| allocator.alloc_unlimited_cell())
@@ -251,6 +260,7 @@ impl<F: FieldExt> EventTableConfig<F> {
             pow_table_lookup_cell,
             bit_table_lookup_cell,
             external_foreign_call_lookup_cell,
+            stack_lookup_context,
             circuit_configure: circuit_configure.clone(),
         };
 
@@ -309,7 +319,7 @@ impl<F: FieldExt> EventTableConfig<F> {
         configure!(OpcodeClass::Test, TestConfigBuilder);
         configure!(OpcodeClass::Unary, UnaryConfigBuilder);
         configure!(OpcodeClass::Load, LoadConfigBuilder);
-        configure!(OpcodeClass::Store, StoreConfigBuilder);
+        // configure!(OpcodeClass::Store, StoreConfigBuilder);
         configure!(OpcodeClass::BinBit, BinBitConfigBuilder);
         configure!(OpcodeClass::MemorySize, MemorySizeConfigBuilder);
         configure!(OpcodeClass::MemoryGrow, MemoryGrowConfigBuilder);
