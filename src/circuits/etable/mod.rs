@@ -37,6 +37,7 @@ use crate::circuits::etable::op_configure::op_memory_size::MemorySizeConfigBuild
 use crate::circuits::etable::op_configure::op_rel::RelConfigBuilder;
 use crate::circuits::etable::op_configure::op_return::ReturnConfigBuilder;
 use crate::circuits::etable::op_configure::op_select::SelectConfigBuilder;
+use crate::circuits::etable::op_configure::op_store::StoreConfigBuilder;
 // use crate::circuits::etable::op_configure::op_store::StoreConfigBuilder;
 use crate::circuits::etable::op_configure::op_test::TestConfigBuilder;
 use crate::circuits::etable::op_configure::op_unary::UnaryConfigBuilder;
@@ -319,7 +320,7 @@ impl<F: FieldExt> EventTableConfig<F> {
         configure!(OpcodeClass::Test, TestConfigBuilder);
         configure!(OpcodeClass::Unary, UnaryConfigBuilder);
         configure!(OpcodeClass::Load, LoadConfigBuilder);
-        // configure!(OpcodeClass::Store, StoreConfigBuilder);
+        configure!(OpcodeClass::Store, StoreConfigBuilder);
         configure!(OpcodeClass::BinBit, BinBitConfigBuilder);
         configure!(OpcodeClass::MemorySize, MemorySizeConfigBuilder);
         configure!(OpcodeClass::MemoryGrow, MemoryGrowConfigBuilder);

@@ -1,5 +1,6 @@
 use crate::circuits::cell::*;
 use crate::circuits::etable::allocator::*;
+use crate::circuits::etable::stack_lookup_context::StackReadLookup;
 use crate::circuits::etable::ConstraintBuilder;
 use crate::circuits::etable::EventTableCommonConfig;
 use crate::circuits::etable::EventTableOpcodeConfig;
@@ -55,7 +56,6 @@ pub struct StoreConfig<F: FieldExt> {
     len: AllocatedUnlimitedCell<F>,
     len_modulus: AllocatedUnlimitedCell<F>,
 
-    store_value: AllocatedU64Cell<F>,
     store_value_tailing_u16_u8_high: AllocatedU8Cell<F>,
     store_value_tailing_u16_u8_low: AllocatedU8Cell<F>,
     store_value_wrapped: AllocatedUnlimitedCell<F>,
@@ -70,10 +70,9 @@ pub struct StoreConfig<F: FieldExt> {
     is_two_bytes: AllocatedBitCell<F>,
     is_four_bytes: AllocatedBitCell<F>,
     is_eight_bytes: AllocatedBitCell<F>,
-    is_i32: AllocatedBitCell<F>,
 
     memory_table_lookup_stack_read_pos: AllocatedMemoryTableLookupReadCell<F>,
-    memory_table_lookup_stack_read_val: AllocatedMemoryTableLookupReadCell<F>,
+    store_value_lookup: StackReadLookup<F>,
     memory_table_lookup_heap_read1: AllocatedMemoryTableLookupReadCell<F>,
     memory_table_lookup_heap_read2: AllocatedMemoryTableLookupReadCell<F>,
     memory_table_lookup_heap_write1: AllocatedMemoryTableLookupWriteCell<F>,
@@ -92,6 +91,10 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for StoreConfigBuilder {
         allocator: &mut EventTableCellAllocator<F>,
         constraint_builder: &mut ConstraintBuilder<F>,
     ) -> Box<dyn EventTableOpcodeConfig<F>> {
+        let mut stack_lookup_context = common_config.stack_lookup_context.clone();
+
+        let store_value_lookup = stack_lookup_context.pop(constraint_builder).unwrap();
+
         let opcode_store_offset = allocator.alloc_common_range_cell();
         let store_base = allocator.alloc_common_range_cell();
 
@@ -117,14 +120,12 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for StoreConfigBuilder {
 
         let pos_modulus = allocator.alloc_u64_cell();
 
-        let store_value = allocator.alloc_u64_cell();
         let store_value_wrapped = allocator.alloc_unlimited_cell();
 
         let is_one_byte = allocator.alloc_bit_cell();
         let is_two_bytes = allocator.alloc_bit_cell();
         let is_four_bytes = allocator.alloc_bit_cell();
         let is_eight_bytes = allocator.alloc_bit_cell();
-        let is_i32 = allocator.alloc_bit_cell();
 
         constraint_builder.push(
             "op_store length",
@@ -273,7 +274,7 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for StoreConfigBuilder {
                 vec![
                     store_value_tailing_u16_u8_high.expr(meta) * constant_from!(1 << 8)
                         + store_value_tailing_u16_u8_low.expr(meta)
-                        - store_value.u16_cells_le[0].expr(meta),
+                        - store_value_lookup.value.u16_cells_le[0].expr(meta),
                 ]
             }),
         );
@@ -284,12 +285,13 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for StoreConfigBuilder {
                 vec![
                     store_value_wrapped.expr(meta)
                         - (is_one_byte.expr(meta) * store_value_tailing_u16_u8_low.expr(meta)
-                            + is_two_bytes.expr(meta) * store_value.u16_cells_le[0].expr(meta)
+                            + is_two_bytes.expr(meta)
+                                * store_value_lookup.value.u16_cells_le[0].expr(meta)
                             + is_four_bytes.expr(meta)
-                                * (store_value.u16_cells_le[0].expr(meta)
-                                    + store_value.u16_cells_le[1].expr(meta)
+                                * (store_value_lookup.value.u16_cells_le[0].expr(meta)
+                                    + store_value_lookup.value.u16_cells_le[1].expr(meta)
                                         * constant_from!(1 << 16))
-                            + is_eight_bytes.expr(meta) * store_value.expr(meta)),
+                            + is_eight_bytes.expr(meta) * store_value_lookup.value.expr(meta)),
                 ]
             }),
         );
@@ -311,17 +313,6 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for StoreConfigBuilder {
 
         let sp = common_config.sp_cell;
         let eid = common_config.eid_cell;
-
-        let memory_table_lookup_stack_read_val = allocator.alloc_memory_table_lookup_read_cell(
-            "store read data",
-            constraint_builder,
-            eid,
-            move |____| constant_from!(LocationType::Stack as u64),
-            move |meta| sp.expr(meta) + constant_from!(1),
-            move |meta| is_i32.expr(meta),
-            move |meta| store_value.expr(meta),
-            move |____| constant_from!(1),
-        );
 
         let memory_table_lookup_stack_read_pos = allocator.alloc_memory_table_lookup_read_cell(
             "store read pos",
@@ -414,7 +405,6 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for StoreConfigBuilder {
             load_picked_byte_proof,
             load_leading,
             unchanged_value,
-            store_value,
             store_value_tailing_u16_u8_high,
             store_value_tailing_u16_u8_low,
             store_value_wrapped,
@@ -425,9 +415,8 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for StoreConfigBuilder {
             is_two_bytes,
             is_four_bytes,
             is_eight_bytes,
-            is_i32,
             memory_table_lookup_stack_read_pos,
-            memory_table_lookup_stack_read_val,
+            store_value_lookup,
             memory_table_lookup_heap_read1,
             memory_table_lookup_heap_read2,
             memory_table_lookup_heap_write1,
@@ -451,7 +440,7 @@ impl<F: FieldExt> EventTableOpcodeConfig<F> for StoreConfig<F> {
 
         constant!(bn_to_field(
             &(BigUint::from(OpcodeClass::Store as u64) << OPCODE_CLASS_SHIFT)
-        )) + self.is_i32.expr(meta)
+        )) + self.store_value_lookup.is_i32.expr(meta)
             * constant!(bn_to_field(&(BigUint::from(1u64) << OPCODE_ARG0_SHIFT)))
             + store_size * constant!(bn_to_field(&(BigUint::from(1u64) << OPCODE_ARG1_SHIFT)))
             + self.opcode_store_offset.expr(meta)
@@ -544,7 +533,6 @@ impl<F: FieldExt> EventTableOpcodeConfig<F> for StoreConfig<F> {
                     &((BigUint::from(leading) << ((inner_byte_index + len) * 8)) + tailing),
                 )?;
 
-                self.store_value.assign(ctx, value)?;
                 self.store_value_tailing_u16_u8_low
                     .assign(ctx, (value & 0xff).into())?;
                 self.store_value_tailing_u16_u8_high
@@ -564,7 +552,6 @@ impl<F: FieldExt> EventTableOpcodeConfig<F> for StoreConfig<F> {
                 self.is_two_bytes.assign_bool(ctx, len == 2)?;
                 self.is_four_bytes.assign_bool(ctx, len == 4)?;
                 self.is_eight_bytes.assign_bool(ctx, len == 8)?;
-                self.is_i32.assign_bool(ctx, vtype == VarType::I32)?;
 
                 self.lookup_pow.assign_bn(
                     ctx,
@@ -581,13 +568,12 @@ impl<F: FieldExt> EventTableOpcodeConfig<F> for StoreConfig<F> {
 
                 self.store_base.assign_u32(ctx, raw_address)?;
 
-                self.memory_table_lookup_stack_read_val.assign(
+                self.store_value_lookup.assign(
                     ctx,
                     entry.memory_rw_entires[0].start_eid,
                     step.current.eid,
                     entry.memory_rw_entires[0].end_eid,
                     step.current.sp + 1,
-                    LocationType::Stack,
                     vtype == VarType::I32,
                     value as u64,
                 )?;
