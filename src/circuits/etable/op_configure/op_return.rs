@@ -1,5 +1,6 @@
 use crate::circuits::cell::*;
 use crate::circuits::etable::allocator::*;
+use crate::circuits::etable::stack_lookup_context::StackReadLookup;
 use crate::circuits::etable::ConstraintBuilder;
 use crate::circuits::etable::EventTableCommonConfig;
 use crate::circuits::etable::EventTableOpcodeConfig;
@@ -31,10 +32,8 @@ use specs::step::StepInfo;
 pub struct ReturnConfig<F: FieldExt> {
     keep: AllocatedBitCell<F>,
     drop: AllocatedCommonRangeCell<F>,
-    is_i32: AllocatedBitCell<F>,
-    value: AllocatedU64Cell<F>,
     frame_table_lookup: AllocatedJumpTableLookupCell<F>,
-    memory_table_lookup_stack_read: AllocatedMemoryTableLookupReadCell<F>,
+    value_read_lookup: StackReadLookup<F>,
     memory_table_lookup_stack_write: AllocatedMemoryTableLookupWriteCell<F>,
 }
 
@@ -46,10 +45,10 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for ReturnConfigBuilder {
         allocator: &mut EventTableCellAllocator<F>,
         constraint_builder: &mut ConstraintBuilder<F>,
     ) -> Box<dyn EventTableOpcodeConfig<F>> {
+        let mut stack_lookup_context = common_config.stack_lookup_context.clone();
+
         let keep = allocator.alloc_bit_cell();
         let drop = allocator.alloc_common_range_cell();
-        let is_i32 = allocator.alloc_bit_cell();
-        let value = allocator.alloc_u64_cell();
 
         let frame_table_lookup = common_config.jtable_lookup_cell;
 
@@ -59,24 +58,17 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for ReturnConfigBuilder {
         let eid = common_config.eid_cell;
         let sp = common_config.sp_cell;
 
-        let memory_table_lookup_stack_read = allocator.alloc_memory_table_lookup_read_cell(
-            "op_return stack read",
-            constraint_builder,
-            eid,
-            move |____| constant_from!(LocationType::Stack as u64),
-            move |meta| sp.expr(meta) + constant_from!(1),
-            move |meta| is_i32.expr(meta),
-            move |meta| value.u64_cell.expr(meta),
-            move |meta| keep.expr(meta),
-        );
+        let value_read_lookup = stack_lookup_context
+            .pop2(constraint_builder, move |meta| keep.expr(meta))
+            .unwrap();
         let memory_table_lookup_stack_write = allocator.alloc_memory_table_lookup_write_cell(
             "op_return stack write",
             constraint_builder,
             eid,
             move |____| constant_from!(LocationType::Stack as u64),
             move |meta| sp.expr(meta) + drop.expr(meta) + constant_from!(1),
-            move |meta| is_i32.expr(meta),
-            move |meta| value.u64_cell.expr(meta),
+            move |meta| value_read_lookup.is_i32.expr(meta),
+            move |meta| value_read_lookup.value.u64_cell.expr(meta),
             move |meta| keep.expr(meta),
         );
 
@@ -99,10 +91,8 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for ReturnConfigBuilder {
         Box::new(ReturnConfig {
             keep,
             drop,
-            is_i32,
-            value,
             frame_table_lookup,
-            memory_table_lookup_stack_read,
+            value_read_lookup,
             memory_table_lookup_stack_write,
         })
     }
@@ -116,7 +106,7 @@ impl<F: FieldExt> EventTableOpcodeConfig<F> for ReturnConfig<F> {
             * constant!(bn_to_field(&(BigUint::from(1u64) << OPCODE_ARG0_SHIFT)))
             + self.keep.expr(meta)
                 * constant!(bn_to_field(&(BigUint::from(1u64) << OPCODE_ARG1_SHIFT)))
-            + self.is_i32.expr(meta)
+            + self.value_read_lookup.is_i32.expr(meta)
     }
 
     fn assign(
@@ -141,17 +131,13 @@ impl<F: FieldExt> EventTableOpcodeConfig<F> for ReturnConfig<F> {
                     self.keep.assign(ctx, 0.into())?;
                 } else {
                     self.keep.assign(ctx, 1.into())?;
-                    self.is_i32
-                        .assign(ctx, (VarType::from(keep[0]) as u64).into())?;
-                    self.value.assign(ctx, keep_values[0])?;
 
-                    self.memory_table_lookup_stack_read.assign(
+                    self.value_read_lookup.assign(
                         ctx,
                         entry.memory_rw_entires[0].start_eid,
                         step.current.eid,
                         entry.memory_rw_entires[0].end_eid,
                         step.current.sp + 1,
-                        LocationType::Stack,
                         VarType::from(keep[0]) == VarType::I32,
                         keep_values[0],
                     )?;
