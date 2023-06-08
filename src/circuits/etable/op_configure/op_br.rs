@@ -1,5 +1,6 @@
 use crate::circuits::cell::*;
 use crate::circuits::etable::allocator::*;
+use crate::circuits::etable::stack_lookup_context::StackReadLookup;
 use crate::circuits::etable::ConstraintBuilder;
 use crate::circuits::etable::EventTableCommonConfig;
 use crate::circuits::etable::EventTableOpcodeConfig;
@@ -20,11 +21,9 @@ use specs::step::StepInfo;
 
 pub struct BrConfig<F: FieldExt> {
     keep_cell: AllocatedBitCell<F>,
-    is_i32_cell: AllocatedBitCell<F>,
     drop_cell: AllocatedCommonRangeCell<F>,
     dst_pc_cell: AllocatedCommonRangeCell<F>,
-    value_cell: AllocatedU64Cell<F>,
-    memory_table_lookup_stack_read: AllocatedMemoryTableLookupReadCell<F>,
+    keep_value_lookup: StackReadLookup<F>,
     memory_table_lookup_stack_write: AllocatedMemoryTableLookupWriteCell<F>,
 }
 
@@ -36,43 +35,35 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for BrConfigBuilder {
         allocator: &mut EventTableCellAllocator<F>,
         constraint_builder: &mut ConstraintBuilder<F>,
     ) -> Box<dyn EventTableOpcodeConfig<F>> {
+        let mut stack_lookup_context = common_config.stack_lookup_context.clone();
+
         let keep_cell = allocator.alloc_bit_cell();
-        let is_i32_cell = allocator.alloc_bit_cell();
         let drop_cell = allocator.alloc_common_range_cell();
         let dst_pc_cell = allocator.alloc_common_range_cell();
-        let value_cell = allocator.alloc_u64_cell();
 
         let eid = common_config.eid_cell;
         let sp = common_config.sp_cell;
 
-        let memory_table_lookup_stack_read = allocator.alloc_memory_table_lookup_read_cell(
-            "op_br stack read",
-            constraint_builder,
-            eid,
-            move |____| constant_from!(LocationType::Stack as u64),
-            move |meta| sp.expr(meta) + constant_from!(1),
-            move |meta| is_i32_cell.expr(meta),
-            move |meta| value_cell.u64_cell.expr(meta),
-            move |meta| keep_cell.expr(meta),
-        );
+        let keep_value_lookup = stack_lookup_context
+            .pop2(constraint_builder, move |meta| keep_cell.expr(meta))
+            .unwrap();
+
         let memory_table_lookup_stack_write = allocator.alloc_memory_table_lookup_write_cell(
             "op_br stack write",
             constraint_builder,
             eid,
             move |____| constant_from!(LocationType::Stack as u64),
             move |meta| sp.expr(meta) + drop_cell.expr(meta) + constant_from!(1),
-            move |meta| is_i32_cell.expr(meta),
-            move |meta| value_cell.u64_cell.expr(meta),
+            move |meta| keep_value_lookup.is_i32.expr(meta),
+            move |meta| keep_value_lookup.value.u64_cell.expr(meta),
             move |meta| keep_cell.expr(meta),
         );
 
         Box::new(BrConfig {
             keep_cell,
-            is_i32_cell,
             drop_cell,
             dst_pc_cell,
-            value_cell,
-            memory_table_lookup_stack_read,
+            keep_value_lookup,
             memory_table_lookup_stack_write,
         })
     }
@@ -106,19 +97,14 @@ impl<F: FieldExt> EventTableOpcodeConfig<F> for BrConfig<F> {
                 self.drop_cell.assign(ctx, F::from(*drop as u64))?;
 
                 if keep.len() > 0 {
-                    let keep_type: VarType = keep[0].into();
-
                     self.keep_cell.assign(ctx, F::one())?;
-                    self.value_cell.assign(ctx, keep_values[0])?;
-                    self.is_i32_cell.assign(ctx, F::from(keep_type as u64))?;
 
-                    self.memory_table_lookup_stack_read.assign(
+                    self.keep_value_lookup.assign(
                         ctx,
                         entry.memory_rw_entires[0].start_eid,
                         step.current.eid,
                         entry.memory_rw_entires[0].end_eid,
                         step.current.sp + 1,
-                        LocationType::Stack,
                         VarType::from(keep[0]) == VarType::I32,
                         keep_values[0],
                     )?;

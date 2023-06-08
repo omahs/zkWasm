@@ -137,4 +137,21 @@ impl<F: FieldExt> StackLookupContext<F> {
 
         stack_read_lookup
     }
+
+    pub(in crate::circuits::etable) fn pop2(
+        &mut self,
+        constraint_builder: &mut ConstraintBuilder<F>,
+        enable: impl FnOnce(&mut VirtualCells<F>) -> Expression<F> + 'static,
+    ) -> Option<StackReadLookup<F>> {
+        let stack_read_lookup: Option<StackReadLookup<F>> = self.stack_read_lookups.pop();
+
+        if let Some(cell) = stack_read_lookup.clone() {
+            constraint_builder.push(
+                "active stack read lookup",
+                Box::new(move |meta| vec![cell.enable.expr(meta) - enable(meta)]),
+            )
+        };
+
+        stack_read_lookup
+    }
 }
