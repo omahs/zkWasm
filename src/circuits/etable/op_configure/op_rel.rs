@@ -1,5 +1,6 @@
 use crate::circuits::cell::*;
 use crate::circuits::etable::allocator::*;
+use crate::circuits::etable::stack_lookup_context::StackReadLookup;
 use crate::circuits::etable::ConstraintBuilder;
 use crate::circuits::etable::EventTableCommonConfig;
 use crate::circuits::etable::EventTableOpcodeConfig;
@@ -54,7 +55,7 @@ pub struct RelConfig<F: FieldExt> {
     l_neg_r_neg: AllocatedUnlimitedCell<F>,
 
     memory_table_lookup_stack_read_lhs: AllocatedMemoryTableLookupReadCell<F>,
-    memory_table_lookup_stack_read_rhs: AllocatedMemoryTableLookupReadCell<F>,
+    rhs_lookup: StackReadLookup<F>,
     memory_table_lookup_stack_write: AllocatedMemoryTableLookupWriteCell<F>,
 }
 
@@ -66,7 +67,11 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for RelConfigBuilder {
         allocator: &mut EventTableCellAllocator<F>,
         constraint_builder: &mut ConstraintBuilder<F>,
     ) -> Box<dyn EventTableOpcodeConfig<F>> {
-        let is_i32 = allocator.alloc_bit_cell();
+        let mut stack_lookup_context = common_config.stack_lookup_context.clone();
+
+        let rhs_lookup = stack_lookup_context.pop(constraint_builder).unwrap();
+
+        let is_i32 = rhs_lookup.is_i32;
         let op_is_sign = allocator.alloc_bit_cell();
 
         let lhs = allocator.alloc_u64_with_flag_bit_cell_dyn_sign(
@@ -74,10 +79,11 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for RelConfigBuilder {
             move |meta| is_i32.expr(meta),
             move |meta| op_is_sign.expr(meta),
         );
-        let rhs = allocator.alloc_u64_with_flag_bit_cell_dyn_sign(
+        let rhs = allocator.constraint_u64_with_flag_bit_cell_dyn_sign(
             constraint_builder,
             move |meta| is_i32.expr(meta),
             move |meta| op_is_sign.expr(meta),
+            rhs_lookup.value,
         );
 
         let diff = allocator.alloc_u64_cell();
@@ -178,17 +184,6 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for RelConfigBuilder {
         let eid = common_config.eid_cell;
         let sp = common_config.sp_cell;
 
-        let memory_table_lookup_stack_read_rhs = allocator.alloc_memory_table_lookup_read_cell(
-            "op_bin stack read",
-            constraint_builder,
-            eid,
-            move |____| constant_from!(LocationType::Stack as u64),
-            move |meta| sp.expr(meta) + constant_from!(1),
-            move |meta| is_i32.expr(meta),
-            move |meta| rhs.u64_cell.expr(meta),
-            move |____| constant_from!(1),
-        );
-
         let memory_table_lookup_stack_read_lhs = allocator.alloc_memory_table_lookup_read_cell(
             "op_bin stack read",
             constraint_builder,
@@ -233,7 +228,7 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for RelConfigBuilder {
             l_pos_r_neg,
             l_neg_r_neg,
             memory_table_lookup_stack_read_lhs,
-            memory_table_lookup_stack_read_rhs,
+            rhs_lookup,
             memory_table_lookup_stack_write,
         })
     }
@@ -368,10 +363,6 @@ impl<F: FieldExt> EventTableOpcodeConfig<F> for RelConfig<F> {
             _ => unreachable!(),
         };
 
-        if var_type == VarType::I32 {
-            self.is_i32.assign(ctx, F::one())?;
-        }
-
         let op_is_sign = vec![
             RelOp::SignedGt,
             RelOp::SignedGe,
@@ -456,13 +447,12 @@ impl<F: FieldExt> EventTableOpcodeConfig<F> for RelConfig<F> {
             }
         };
 
-        self.memory_table_lookup_stack_read_rhs.assign(
+        self.rhs_lookup.assign(
             ctx,
             entry.memory_rw_entires[0].start_eid,
             step.current.eid,
             entry.memory_rw_entires[0].end_eid,
             step.current.sp + 1,
-            LocationType::Stack,
             var_type == VarType::I32,
             rhs,
         )?;

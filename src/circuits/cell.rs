@@ -208,6 +208,7 @@ impl<F: FieldExt> AllocatedU64CellWithFlagBitDynSign<F> {
         for i in 0..4 {
             self.u16_cells_le[i].assign(ctx, ((value >> (i * 16)) & 0xffffu64).into())?;
         }
+        // TODO: remove me
         self.u64_cell.assign(ctx, value.into())?;
 
         if is_sign {
