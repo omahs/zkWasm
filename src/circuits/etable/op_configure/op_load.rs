@@ -1,5 +1,6 @@
 use crate::circuits::cell::*;
 use crate::circuits::etable::allocator::*;
+use crate::circuits::etable::stack_lookup_context::StackReadLookup;
 use crate::circuits::etable::ConstraintBuilder;
 use crate::circuits::etable::EventTableCommonConfig;
 use crate::circuits::etable::EventTableOpcodeConfig;
@@ -58,9 +59,6 @@ pub struct LoadConfig<F: FieldExt> {
 
     res: AllocatedUnlimitedCell<F>,
 
-    // load offset arg
-    load_base: AllocatedU64Cell<F>,
-
     is_one_byte: AllocatedBitCell<F>,
     is_two_bytes: AllocatedBitCell<F>,
     is_four_bytes: AllocatedBitCell<F>,
@@ -73,7 +71,7 @@ pub struct LoadConfig<F: FieldExt> {
 
     pos_modulus: AllocatedU64Cell<F>,
 
-    memory_table_lookup_stack_read: AllocatedMemoryTableLookupReadCell<F>,
+    base_address_lookup: StackReadLookup<F>,
     memory_table_lookup_heap_read1: AllocatedMemoryTableLookupReadCell<F>,
     memory_table_lookup_heap_read2: AllocatedMemoryTableLookupReadCell<F>,
     memory_table_lookup_stack_write: AllocatedMemoryTableLookupWriteCell<F>,
@@ -93,8 +91,11 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for LoadConfigBuilder {
         allocator: &mut EventTableCellAllocator<F>,
         constraint_builder: &mut ConstraintBuilder<F>,
     ) -> Box<dyn EventTableOpcodeConfig<F>> {
+        let mut stack_lookup_context = common_config.stack_lookup_context.clone();
+
+        let base_address_lookup = stack_lookup_context.pop(constraint_builder).unwrap();
+
         let opcode_load_offset = allocator.alloc_common_range_cell();
-        let load_base = allocator.alloc_u64_cell();
 
         // which heap offset to load
         let load_block_index = allocator.alloc_common_range_cell();
@@ -169,7 +170,7 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for LoadConfigBuilder {
                 vec![
                     load_block_index.expr(meta) * constant_from!(8) + load_inner_pos.expr(meta)
                         - opcode_load_offset.expr(meta)
-                        - load_base.expr(meta),
+                        - base_address_lookup.value.expr(meta),
                     load_inner_pos.expr(meta) + load_inner_pos_diff.expr(meta) - constant_from!(7),
                 ]
             }),
@@ -305,17 +306,6 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for LoadConfigBuilder {
         let sp = common_config.sp_cell;
         let eid = common_config.eid_cell;
 
-        let memory_table_lookup_stack_read = allocator.alloc_memory_table_lookup_read_cell(
-            "load read offset",
-            constraint_builder,
-            eid,
-            move |____| constant_from!(LocationType::Stack as u64),
-            move |meta| sp.expr(meta) + constant_from!(1),
-            move |____| constant_from!(1),
-            move |meta| load_base.expr(meta),
-            move |____| constant_from!(1),
-        );
-
         let memory_table_lookup_heap_read1 = allocator.alloc_memory_table_lookup_read_cell(
             "load read data1",
             constraint_builder,
@@ -361,7 +351,7 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for LoadConfigBuilder {
                     + is_eight_bytes.expr(meta) * constant_from!(7);
 
                 vec![
-                    (load_base.expr(meta)
+                    (base_address_lookup.value.expr(meta)
                         + opcode_load_offset.expr(meta)
                         + len
                         + address_within_allocated_pages_helper.expr(meta)
@@ -389,7 +379,6 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for LoadConfigBuilder {
             load_picked_leading_u8_rem,
             load_picked_leading_u8_rem_diff,
             res,
-            load_base,
             is_one_byte,
             is_two_bytes,
             is_four_bytes,
@@ -398,7 +387,7 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for LoadConfigBuilder {
             len_modulus,
             is_sign,
             is_i32,
-            memory_table_lookup_stack_read,
+            base_address_lookup,
             memory_table_lookup_heap_read1,
             memory_table_lookup_heap_read2,
             memory_table_lookup_stack_write,
@@ -525,7 +514,6 @@ impl<F: FieldExt> EventTableOpcodeConfig<F> for LoadConfig<F> {
                     .assign(ctx, (0x7f - (load_picked_leading_u8 & 0x7f)).into())?;
 
                 self.res.assign(ctx, value.into())?;
-                self.load_base.assign(ctx, raw_address as u64)?;
 
                 self.is_one_byte.assign_bool(ctx, len == 1)?;
                 self.is_two_bytes.assign_bool(ctx, len == 2)?;
@@ -551,13 +539,12 @@ impl<F: FieldExt> EventTableOpcodeConfig<F> for LoadConfig<F> {
                 )?;
 
                 let mut i = 0;
-                self.memory_table_lookup_stack_read.assign(
+                self.base_address_lookup.assign(
                     ctx,
                     entry.memory_rw_entires[i].start_eid,
                     step.current.eid,
                     entry.memory_rw_entires[i].end_eid,
                     step.current.sp + 1,
-                    LocationType::Stack,
                     true,
                     raw_address as u64,
                 )?;
