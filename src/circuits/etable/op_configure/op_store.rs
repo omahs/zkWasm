@@ -41,7 +41,7 @@ pub struct StoreConfig<F: FieldExt> {
     cross_block_rem: AllocatedCommonRangeCell<F>,
     cross_block_rem_diff: AllocatedCommonRangeCell<F>,
 
-    load_value_in_heap1: AllocatedU64Cell<F>,
+    load_value_in_heap1: AllocatedUnlimitedCell<F>,
     load_value_in_heap2: AllocatedU64Cell<F>,
 
     load_tailing: AllocatedU64Cell<F>,
@@ -63,15 +63,12 @@ pub struct StoreConfig<F: FieldExt> {
     store_value_in_heap1: AllocatedU64Cell<F>,
     store_value_in_heap2: AllocatedU64Cell<F>,
 
-    // load offset arg
-    store_base: AllocatedCommonRangeCell<F>,
-
     is_one_byte: AllocatedBitCell<F>,
     is_two_bytes: AllocatedBitCell<F>,
     is_four_bytes: AllocatedBitCell<F>,
     is_eight_bytes: AllocatedBitCell<F>,
 
-    memory_table_lookup_stack_read_pos: AllocatedMemoryTableLookupReadCell<F>,
+    store_base_lookup: StackReadLookup<F>,
     store_value_lookup: StackReadLookup<F>,
     memory_table_lookup_heap_read1: AllocatedMemoryTableLookupReadCell<F>,
     memory_table_lookup_heap_read2: AllocatedMemoryTableLookupReadCell<F>,
@@ -94,9 +91,9 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for StoreConfigBuilder {
         let mut stack_lookup_context = common_config.stack_lookup_context.clone();
 
         let store_value_lookup = stack_lookup_context.pop(constraint_builder).unwrap();
+        let store_base_lookup = stack_lookup_context.pop(constraint_builder).unwrap();
 
         let opcode_store_offset = allocator.alloc_common_range_cell();
-        let store_base = allocator.alloc_common_range_cell();
 
         // which heap offset to load
         let load_block_index = allocator.alloc_common_range_cell();
@@ -109,7 +106,7 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for StoreConfigBuilder {
         let len = allocator.alloc_unlimited_cell();
         let len_modulus = allocator.alloc_unlimited_cell();
 
-        let load_value_in_heap1 = allocator.alloc_u64_cell();
+        let load_value_in_heap1 = allocator.alloc_unlimited_cell();
         let load_value_in_heap2 = allocator.alloc_u64_cell();
 
         let load_tailing = allocator.alloc_u64_cell();
@@ -160,7 +157,7 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for StoreConfigBuilder {
                     load_block_index.expr(meta) * constant_from!(8)
                         + load_block_inner_pos.expr(meta)
                         - opcode_store_offset.expr(meta)
-                        - store_base.expr(meta),
+                        - store_base_lookup.value.expr(meta),
                     load_block_inner_pos.expr(meta)
                         - load_block_inner_pos_bits[0].expr(meta)
                         - load_block_inner_pos_bits[1].expr(meta) * constant_from!(2)
@@ -311,19 +308,7 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for StoreConfigBuilder {
             }),
         );
 
-        let sp = common_config.sp_cell;
         let eid = common_config.eid_cell;
-
-        let memory_table_lookup_stack_read_pos = allocator.alloc_memory_table_lookup_read_cell(
-            "store read pos",
-            constraint_builder,
-            eid,
-            move |____| constant_from!(LocationType::Stack as u64),
-            move |meta| sp.expr(meta) + constant_from!(2),
-            move |____| constant_from!(1),
-            move |meta| store_base.expr(meta),
-            move |____| constant_from!(1),
-        );
 
         let memory_table_lookup_heap_read1 = allocator.alloc_memory_table_lookup_read_cell(
             "store load origin1",
@@ -381,7 +366,7 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for StoreConfigBuilder {
                     + is_eight_bytes.expr(meta) * constant_from!(7);
 
                 vec![
-                    (store_base.expr(meta)
+                    (store_base_lookup.value.expr(meta)
                         + opcode_store_offset.expr(meta)
                         + len
                         + address_within_allocated_pages_helper.expr(meta)
@@ -389,6 +374,8 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for StoreConfigBuilder {
                 ]
             }),
         );
+
+        println!("allocator: {:?}", allocator);
 
         Box::new(StoreConfig {
             opcode_store_offset,
@@ -410,12 +397,11 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for StoreConfigBuilder {
             store_value_wrapped,
             store_value_in_heap1,
             store_value_in_heap2,
-            store_base,
             is_one_byte,
             is_two_bytes,
             is_four_bytes,
             is_eight_bytes,
-            memory_table_lookup_stack_read_pos,
+            store_base_lookup,
             store_value_lookup,
             memory_table_lookup_heap_read1,
             memory_table_lookup_heap_read2,
@@ -498,7 +484,8 @@ impl<F: FieldExt> EventTableOpcodeConfig<F> for StoreConfig<F> {
                 self.cross_block_rem.assign(ctx, rem.into())?;
                 self.cross_block_rem_diff.assign(ctx, (7 - rem).into())?;
 
-                self.load_value_in_heap1.assign(ctx, pre_block_value1)?;
+                self.load_value_in_heap1
+                    .assign(ctx, F::from(pre_block_value1))?;
                 self.load_value_in_heap2.assign(ctx, pre_block_value2)?;
 
                 let tailing_bits = inner_byte_index * 8;
@@ -566,8 +553,6 @@ impl<F: FieldExt> EventTableOpcodeConfig<F> for StoreConfig<F> {
                     ),
                 )?;
 
-                self.store_base.assign_u32(ctx, raw_address)?;
-
                 self.store_value_lookup.assign(
                     ctx,
                     entry.memory_rw_entires[0].start_eid,
@@ -578,13 +563,12 @@ impl<F: FieldExt> EventTableOpcodeConfig<F> for StoreConfig<F> {
                     value as u64,
                 )?;
 
-                self.memory_table_lookup_stack_read_pos.assign(
+                self.store_base_lookup.assign(
                     ctx,
                     entry.memory_rw_entires[1].start_eid,
                     step.current.eid,
                     entry.memory_rw_entires[1].end_eid,
                     step.current.sp + 2,
-                    LocationType::Stack,
                     true,
                     raw_address as u64,
                 )?;

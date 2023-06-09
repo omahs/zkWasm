@@ -19,7 +19,7 @@ use super::allocator::EventTableCellAllocator;
 use super::allocator::EventTableCellType;
 use super::constraint_builder::ConstraintBuilder;
 
-const POP_NUM: usize = 1;
+const POP_NUM: usize = 2;
 
 #[derive(Clone)]
 pub(in crate::circuits::etable) struct StackReadLookup<F: FieldExt> {
@@ -56,6 +56,20 @@ impl<F: FieldExt> StackReadLookup<F> {
         )?;
 
         Ok(())
+    }
+
+    pub(in crate::circuits::etable) fn equal_vartype(
+        &self,
+        constraint_builder: &mut ConstraintBuilder<F>,
+        other: &StackReadLookup<F>,
+    ) {
+        let source_is_32 = self.is_i32.clone();
+        let target_is_i32 = other.is_i32.clone();
+
+        constraint_builder.push(
+            "stack_read_lookup: equal vartype",
+            Box::new(move |meta| vec![source_is_32.expr(meta) - target_is_i32.expr(meta)]),
+        )
     }
 }
 
