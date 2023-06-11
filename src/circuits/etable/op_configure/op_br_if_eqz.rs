@@ -31,12 +31,11 @@ pub struct BrIfEqzConfig<F: FieldExt> {
     cond_is_not_zero_cell: AllocatedBitCell<F>,
 
     keep_cell: AllocatedBitCell<F>,
-    is_i32_cell: AllocatedBitCell<F>,
     drop_cell: AllocatedCommonRangeCell<F>,
     dst_pc_cell: AllocatedCommonRangeCell<F>,
-    value_cell: AllocatedU64Cell<F>,
+
     cond_lookup: StackReadLookup<F>,
-    memory_table_lookup_stack_read_return_value: AllocatedMemoryTableLookupReadCell<F>,
+    return_value_lookup: StackReadLookup<F>,
     memory_table_lookup_stack_write_return_value: AllocatedMemoryTableLookupWriteCell<F>,
 }
 
@@ -50,10 +49,21 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for BrIfEqzConfigBuilder {
     ) -> Box<dyn EventTableOpcodeConfig<F>> {
         let mut stack_lookup_context = common_config.stack_lookup_context.clone();
 
-        let cond_lookup = stack_lookup_context.pop(constraint_builder).unwrap();
         let cond_inv_cell = allocator.alloc_unlimited_cell();
         let cond_is_zero_cell = allocator.alloc_bit_cell();
         let cond_is_not_zero_cell = allocator.alloc_bit_cell();
+
+        let keep_cell = allocator.alloc_bit_cell();
+        let drop_cell = allocator.alloc_common_range_cell();
+        let dst_pc_cell = allocator.alloc_common_range_cell();
+
+        let cond_lookup = stack_lookup_context.pop(constraint_builder).unwrap();
+        let return_value_lookup = stack_lookup_context
+            .pop2(constraint_builder, move |meta| {
+                keep_cell.expr(meta) * cond_is_zero_cell.expr(meta)
+            })
+            .unwrap();
+        let is_i32_cell = return_value_lookup.is_i32;
 
         constraint_builder.constraints.push((
             "op_br_if cond bit",
@@ -69,26 +79,9 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for BrIfEqzConfigBuilder {
             }),
         ));
 
-        let keep_cell = allocator.alloc_bit_cell();
-        let is_i32_cell = allocator.alloc_bit_cell();
-        let drop_cell = allocator.alloc_common_range_cell();
-        let dst_pc_cell = allocator.alloc_common_range_cell();
-        let value_cell = allocator.alloc_u64_cell();
-
         let eid = common_config.eid_cell;
         let sp = common_config.sp_cell;
 
-        let memory_table_lookup_stack_read_return_value = allocator
-            .alloc_memory_table_lookup_read_cell(
-                "op_br_if_eqz stack read return value",
-                constraint_builder,
-                eid,
-                move |____| constant_from!(LocationType::Stack as u64),
-                move |meta| sp.expr(meta) + constant_from!(2),
-                move |meta| is_i32_cell.expr(meta),
-                move |meta| value_cell.u64_cell.expr(meta),
-                move |meta| keep_cell.expr(meta) * cond_is_zero_cell.expr(meta),
-            );
         let memory_table_lookup_stack_write_return_value = allocator
             .alloc_memory_table_lookup_write_cell(
                 "op_br_if_eqz stack write return value",
@@ -97,7 +90,7 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for BrIfEqzConfigBuilder {
                 move |____| constant_from!(LocationType::Stack as u64),
                 move |meta| sp.expr(meta) + drop_cell.expr(meta) + constant_from!(2),
                 move |meta| is_i32_cell.expr(meta),
-                move |meta| value_cell.u64_cell.expr(meta),
+                move |meta| return_value_lookup.value.u64_cell.expr(meta),
                 move |meta| keep_cell.expr(meta) * cond_is_zero_cell.expr(meta),
             );
 
@@ -106,12 +99,10 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for BrIfEqzConfigBuilder {
             cond_is_zero_cell,
             cond_is_not_zero_cell,
             keep_cell,
-            is_i32_cell,
             drop_cell,
             dst_pc_cell,
-            value_cell,
             cond_lookup,
-            memory_table_lookup_stack_read_return_value,
+            return_value_lookup,
             memory_table_lookup_stack_write_return_value,
         })
     }
@@ -159,19 +150,14 @@ impl<F: FieldExt> EventTableOpcodeConfig<F> for BrIfEqzConfig<F> {
                 self.drop_cell.assign(ctx, F::from(*drop as u64))?;
 
                 if keep.len() > 0 {
-                    let keep_type: VarType = keep[0].into();
-
                     self.keep_cell.assign(ctx, F::one())?;
-                    self.value_cell.assign(ctx, keep_values[0])?;
-                    self.is_i32_cell.assign(ctx, F::from(keep_type as u64))?;
                     if *condition == 0 {
-                        self.memory_table_lookup_stack_read_return_value.assign(
+                        self.return_value_lookup.assign(
                             ctx,
                             entry.memory_rw_entires[1].start_eid,
                             step.current.eid,
                             entry.memory_rw_entires[1].end_eid,
                             step.current.sp + 2,
-                            LocationType::Stack,
                             VarType::from(keep[0]) == VarType::I32,
                             keep_values[0],
                         )?;

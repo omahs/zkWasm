@@ -23,8 +23,6 @@ use specs::step::StepInfo;
 
 pub struct BrTableConfig<F: FieldExt> {
     keep: AllocatedBitCell<F>,
-    keep_is_i32: AllocatedBitCell<F>,
-    keep_value: AllocatedU64Cell<F>,
     drop: AllocatedCommonRangeCell<F>,
     dst_iid: AllocatedCommonRangeCell<F>,
 
@@ -37,7 +35,7 @@ pub struct BrTableConfig<F: FieldExt> {
     br_table_lookup: AllocatedUnlimitedCell<F>,
 
     expected_index_lookup: StackReadLookup<F>,
-    memory_table_lookup_stack_read_return_value: AllocatedMemoryTableLookupReadCell<F>,
+    keep_value_lookup: StackReadLookup<F>,
     memory_table_lookup_stack_write_return_value: AllocatedMemoryTableLookupWriteCell<F>,
 }
 
@@ -51,11 +49,7 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for BrTableConfigBuilder {
     ) -> Box<dyn EventTableOpcodeConfig<F>> {
         let mut stack_lookup_context = common_config.stack_lookup_context.clone();
 
-        let expected_index_lookup = stack_lookup_context.pop(constraint_builder).unwrap();
-
         let keep = allocator.alloc_bit_cell();
-        let keep_is_i32 = allocator.alloc_bit_cell();
-        let keep_value = allocator.alloc_u64_cell();
         let drop = allocator.alloc_common_range_cell();
         let dst_iid = allocator.alloc_common_range_cell();
         let effective_index = allocator.alloc_common_range_cell();
@@ -63,6 +57,11 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for BrTableConfigBuilder {
         let is_out_of_bound = allocator.alloc_bit_cell();
         let is_not_out_of_bound = allocator.alloc_bit_cell();
         let diff = allocator.alloc_u64_cell();
+
+        let expected_index_lookup = stack_lookup_context.pop(constraint_builder).unwrap();
+        let keep_value_lookup = stack_lookup_context
+            .pop2(constraint_builder, move |meta| keep.expr(meta))
+            .unwrap();
 
         constraint_builder.push(
             "op_br_table oob",
@@ -120,18 +119,6 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for BrTableConfigBuilder {
         let eid = common_config.eid_cell;
         let sp = common_config.sp_cell;
 
-        let memory_table_lookup_stack_read_return_value = allocator
-            .alloc_memory_table_lookup_read_cell(
-                "op_br_table stack read index",
-                constraint_builder,
-                eid,
-                move |____| constant_from!(LocationType::Stack as u64),
-                move |meta| sp.expr(meta) + constant_from!(2),
-                move |meta| keep_is_i32.expr(meta),
-                move |meta| keep_value.expr(meta),
-                move |meta| keep.expr(meta),
-            );
-
         let memory_table_lookup_stack_write_return_value = allocator
             .alloc_memory_table_lookup_write_cell(
                 "op_br stack write",
@@ -139,15 +126,13 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for BrTableConfigBuilder {
                 eid,
                 move |____| constant_from!(LocationType::Stack as u64),
                 move |meta| sp.expr(meta) + drop.expr(meta) + constant_from!(2),
-                move |meta| keep_is_i32.expr(meta),
-                move |meta| keep_value.expr(meta),
+                move |meta| keep_value_lookup.is_i32.expr(meta),
+                move |meta| keep_value_lookup.value.expr(meta),
                 move |meta| keep.expr(meta),
             );
 
         Box::new(BrTableConfig {
             keep,
-            keep_is_i32,
-            keep_value,
             drop,
             dst_iid,
             effective_index,
@@ -157,7 +142,7 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for BrTableConfigBuilder {
             diff,
             br_table_lookup,
             expected_index_lookup,
-            memory_table_lookup_stack_read_return_value,
+            keep_value_lookup,
             memory_table_lookup_stack_write_return_value,
         })
     }
@@ -205,20 +190,14 @@ impl<F: FieldExt> EventTableOpcodeConfig<F> for BrTableConfig<F> {
                 )?;
 
                 if keep.len() > 0 {
-                    let keep_type: VarType = keep[0].into();
-
                     self.keep.assign(ctx, F::one())?;
-                    self.keep_value.assign(ctx, keep_values[0])?;
-                    self.keep_is_i32
-                        .assign_bool(ctx, keep_type == VarType::I32)?;
 
-                    self.memory_table_lookup_stack_read_return_value.assign(
+                    self.keep_value_lookup.assign(
                         ctx,
                         entry.memory_rw_entires[1].start_eid,
                         step.current.eid,
                         entry.memory_rw_entires[1].end_eid,
                         step.current.sp + 2,
-                        LocationType::Stack,
                         VarType::from(keep[0]) == VarType::I32,
                         keep_values[0],
                     )?;
