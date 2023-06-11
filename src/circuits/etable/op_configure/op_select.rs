@@ -27,12 +27,10 @@ pub struct SelectConfig<F: FieldExt> {
     cond_inv: AllocatedUnlimitedCell<F>,
 
     val1: AllocatedU64Cell<F>,
-    val2: AllocatedU64Cell<F>,
     res: AllocatedU64Cell<F>,
-    is_i32: AllocatedBitCell<F>,
 
     cond_lookup: StackReadLookup<F>,
-    memory_table_lookup_stack_read_val2: AllocatedMemoryTableLookupReadCell<F>,
+    val2_lookup: StackReadLookup<F>,
     memory_table_lookup_stack_read_val1: AllocatedMemoryTableLookupReadCell<F>,
     memory_table_lookup_stack_write: AllocatedMemoryTableLookupWriteCell<F>,
 }
@@ -48,12 +46,13 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for SelectConfigBuilder {
         let mut stack_lookup_context = common_config.stack_lookup_context.clone();
 
         let cond_lookup = stack_lookup_context.pop(constraint_builder).unwrap();
+        let val2_lookup = stack_lookup_context.pop(constraint_builder).unwrap();
+
         let cond_inv = allocator.alloc_unlimited_cell();
 
         let val1 = allocator.alloc_u64_cell();
-        let val2 = allocator.alloc_u64_cell();
         let res = allocator.alloc_u64_cell();
-        let is_i32 = allocator.alloc_bit_cell();
+        let is_i32 = val2_lookup.is_i32;
 
         constraint_builder.push(
             "select: cond is zero",
@@ -61,7 +60,7 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for SelectConfigBuilder {
                 vec![
                     (constant_from!(1)
                         - cond_lookup.value.u64_cell.expr(meta) * cond_inv.expr(meta))
-                        * (res.u64_cell.expr(meta) - val2.u64_cell.expr(meta)),
+                        * (res.u64_cell.expr(meta) - val2_lookup.value.u64_cell.expr(meta)),
                 ]
             }),
         );
@@ -78,17 +77,6 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for SelectConfigBuilder {
 
         let eid = common_config.eid_cell;
         let sp = common_config.sp_cell;
-
-        let memory_table_lookup_stack_read_val2 = allocator.alloc_memory_table_lookup_read_cell(
-            "op_select stack read",
-            constraint_builder,
-            eid,
-            move |____| constant_from!(LocationType::Stack as u64),
-            move |meta| sp.expr(meta) + constant_from!(2),
-            move |meta| is_i32.expr(meta),
-            move |meta| val2.u64_cell.expr(meta),
-            move |____| constant_from!(1),
-        );
 
         let memory_table_lookup_stack_read_val1 = allocator.alloc_memory_table_lookup_read_cell(
             "op_select stack read",
@@ -115,11 +103,9 @@ impl<F: FieldExt> EventTableOpcodeConfigBuilder<F> for SelectConfigBuilder {
         Box::new(SelectConfig {
             cond_inv,
             val1,
-            val2,
             res,
-            is_i32,
             cond_lookup,
-            memory_table_lookup_stack_read_val2,
+            val2_lookup,
             memory_table_lookup_stack_read_val1,
             memory_table_lookup_stack_write,
         })
@@ -148,11 +134,9 @@ impl<F: FieldExt> EventTableOpcodeConfig<F> for SelectConfig<F> {
                 vtype,
             } => {
                 self.val1.assign(ctx, *val1)?;
-                self.val2.assign(ctx, *val2)?;
                 self.cond_inv
                     .assign(ctx, F::from(*cond).invert().unwrap_or(F::zero()))?;
                 self.res.assign(ctx, *result)?;
-                self.is_i32.assign_bool(ctx, *vtype == VarType::I32)?;
 
                 self.cond_lookup.assign(
                     ctx,
@@ -164,13 +148,12 @@ impl<F: FieldExt> EventTableOpcodeConfig<F> for SelectConfig<F> {
                     *cond,
                 )?;
 
-                self.memory_table_lookup_stack_read_val2.assign(
+                self.val2_lookup.assign(
                     ctx,
                     entry.memory_rw_entires[1].start_eid,
                     step.current.eid,
                     entry.memory_rw_entires[1].end_eid,
                     step.current.sp + 2,
-                    LocationType::Stack,
                     *vtype == VarType::I32,
                     *val2,
                 )?;
