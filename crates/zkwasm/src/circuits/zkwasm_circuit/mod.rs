@@ -241,6 +241,23 @@ macro_rules! impl_zkwasm_circuit {
                 config: Self::Config,
                 layouter: impl Layouter<F>,
             ) -> Result<(), Error> {
+                use std::{
+                    io::{Read, Write},
+                    os::fd::FromRawFd,
+                };
+                
+                let ctl_fd = i32::from_str_radix(&std::env::var("PERF_CTL_FD").unwrap(), 10).unwrap();
+                let ctl_ack_fd = i32::from_str_radix(&std::env::var("PERF_CTL_ACK_FD").unwrap(), 10).unwrap();
+            
+                let mut fd = unsafe { std::fs::File::from_raw_fd(ctl_fd) };
+                let mut ack_fd = unsafe { std::fs::File::from_raw_fd(ctl_ack_fd) };
+            
+                fd.write(b"enable\n").unwrap();
+            
+                let mut v = vec![0u8; 5];
+                ack_fd.read_exact(&mut v).unwrap();
+                println!("{:?}", String::from_utf8(v));
+
                 let timer = start_timer!(|| "Prepare assignment");
 
                 let rchip = RangeTableChip::new(config.rtable);
@@ -568,6 +585,11 @@ macro_rules! impl_zkwasm_circuit {
                     },
                 )?;
                 end_timer!(timer);
+
+                fd.write(b"disable\n").unwrap();
+                let mut v = vec![0u8; 5];
+                ack_fd.read_exact(&mut v).unwrap();
+                println!("{:?}", String::from_utf8(v));
 
                 Ok(())
             }

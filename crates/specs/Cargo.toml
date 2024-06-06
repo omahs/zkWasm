@@ -20,6 +20,7 @@ num-traits.workspace = true
 parity-wasm.workspace = true
 rayon.workspace = true
 static_assertions.workspace = true
+ark-std = { version = "0.4.0" }
 
 [features]
 default = []
