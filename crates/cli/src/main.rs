@@ -1,5 +1,8 @@
 #![deny(warnings)]
 
+#[macro_use]
+extern crate lazy_static;
+
 use std::fs;
 use std::path::PathBuf;
 

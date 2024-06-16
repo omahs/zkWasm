@@ -39,6 +39,10 @@ use crate::names::name_of_params;
 use crate::names::name_of_transcript;
 use crate::names::name_of_witness;
 
+lazy_static! {
+    static ref BENCH_COUNT: usize = std::env::var("BENCH_COUNT").map_or(1, |v| v.parse().unwrap());
+}
+
 #[derive(Serialize, Deserialize)]
 pub(crate) struct CircuitDataMd5 {
     pub(crate) circuit_data_md5: String,
@@ -386,6 +390,31 @@ impl Config {
                 instance: name_of_instance(&self.name, index),
                 transcript: name_of_transcript(&self.name, index),
             };
+
+            for i in 0..(*BENCH_COUNT - 1) {
+                println!("bench circuit: {}", i);
+                let _ = match &circuit {
+                    ZkWasmCircuit::Ongoing(circuit) => proof_piece_info.create_proof::<Bn256, _>(
+                        circuit,
+                        &vec![instances.clone()],
+                        &params,
+                        &cached_proving_key.as_ref().unwrap().1,
+                        proof_load_info.hashtype,
+                        OpenSchema::Shplonk,
+                    ),
+                    ZkWasmCircuit::LastSliceCircuit(circuit) => proof_piece_info
+                        .create_proof::<Bn256, _>(
+                            circuit,
+                            &vec![instances.clone()],
+                            &params,
+                            &cached_proving_key.as_ref().unwrap().1,
+                            proof_load_info.hashtype,
+                            OpenSchema::Shplonk,
+                        ),
+                };
+            }
+
+            println!("bench circuit: {}", *BENCH_COUNT - 1);
 
             let proof = match circuit {
                 ZkWasmCircuit::Ongoing(circuit) => proof_piece_info.create_proof::<Bn256, _>(
